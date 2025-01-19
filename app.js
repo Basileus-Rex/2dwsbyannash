@@ -2249,9 +2249,9 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       })
       .name('Tool')
       .listen();
-    UI_folder.add(guiControls, 'brushSize', 1, 200, 1).name('Brush Diameter').listen();
+    UI_folder.add(guiControls, 'brushSize', 1, 1000, 1).name('Brush Diameter').listen();
     UI_folder.add(guiControls, 'wholeWidth').name('Whole Width Brush').listen();
-    UI_folder.add(guiControls, 'intensity', 0.005, 0.05, 0.001).name('Brush Intensity');
+    UI_folder.add(guiControls, 'intensity', 0.005, 20.00, 0.001).name('Brush Intensity');
 
     var radiation_folder = datGui.addFolder('Radiation');
 
