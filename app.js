@@ -791,7 +791,7 @@ class Weatherstation
     this.#solarPower = Math.max(lightTextureValues[0] * Math.sin(guiControls.sunAngle * degToRad) * 1361.0, 0.0);
 
 
-    if (waterTextureValues[4 + 0] > 1110) { // is not air
+    if (waterTextureValues[4 + 0] > 11100000) { // is not air
       this.destroy();                       // remove weather station
     }
 
