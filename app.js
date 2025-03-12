@@ -2381,7 +2381,7 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       })
       .name('Vorticity');
 
-    fluidParams_folder.add(guiControls, 'dragMultiplier', 0.0, 1.0, 0.01)
+    fluidParams_folder.add(guiControls, 'dragMultiplier', 0.0, 100.0, 0.01)
       .onChange(function() {
         gl.useProgram(velocityProgram);
         gl.uniform1f(gl.getUniformLocation(velocityProgram, 'dragMultiplier'), guiControls.dragMultiplier);
@@ -2395,14 +2395,14 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       })
       .name('Wind');
 
-    fluidParams_folder.add(guiControls, 'globalDrying', 0.0, 0.0001, 0.000001)
+    fluidParams_folder.add(guiControls, 'globalDrying', -10.0, 10.0, 0.000001)
       .onChange(function() {
         gl.useProgram(advectionProgram);
         gl.uniform1f(gl.getUniformLocation(advectionProgram, 'globalDrying'), guiControls.globalDrying);
       })
       .name('Global Drying');
 
-    fluidParams_folder.add(guiControls, 'globalHeating', -0.001, 0.001, 0.00001)
+    fluidParams_folder.add(guiControls, 'globalHeating', -10.0, 10.0, 0.00001)
       .onChange(function() {
         gl.useProgram(advectionProgram);
         gl.uniform1f(gl.getUniformLocation(advectionProgram, 'globalHeating'), guiControls.globalHeating);
@@ -2492,13 +2492,13 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
         gl.uniform1f(gl.getUniformLocation(lightingProgram, 'waterTemperature'), CtoK(guiControls.waterTemperature));
       })
       .name('Lake / Sea Temperature (°C)');
-    water_folder.add(guiControls, 'landEvaporation', 0.0, 100.0, 0.00001)
+    water_folder.add(guiControls, 'landEvaporation', -100.0, 100.0, 0.00001)
       .onChange(function() {
         gl.useProgram(boundaryProgram);
         gl.uniform1f(gl.getUniformLocation(boundaryProgram, 'landEvaporation'), guiControls.landEvaporation);
       })
       .name('Land Evaporation');
-    water_folder.add(guiControls, 'waterEvaporation', 0.0, 100.0, 0.00001)
+    water_folder.add(guiControls, 'waterEvaporation', -100.0, 100.0, 0.00001)
       .onChange(function() {
         gl.useProgram(boundaryProgram);
         gl.uniform1f(gl.getUniformLocation(boundaryProgram, 'waterEvaporation'), guiControls.waterEvaporation);
