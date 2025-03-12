@@ -16,6 +16,8 @@ function updateSetupSliders()
   document.getElementById("simHeightShow").value = parseInt(simHeightSel.value) + ' m';
 }
 
+var FPS = 60.0;
+
 var canvas;
 var gl;
 
@@ -102,6 +104,8 @@ var displayWeatherStations = true;
 var sunIsUp = true;
 
 var airplaneMode = false;
+
+var dropletFollowID = -1;
 
 var minShadowLight = 0.02;
 
@@ -1142,12 +1146,24 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       this.tarXpos = this.curXpos = this.curXposLin = 0.0;
       this.tarYpos = this.curYpos = -0.5 + sim_res_y / sim_res_x;
       this.tarZoom = this.curZoom = 1.0001;
+      this.#Xvel = 0;
+      this.#Yvel = 0;
+      this.#Zvel = 0;
     }
 
     changeCurXpos(change)
     {
       this.curXposLin = this.curXposLin + change;
       this.curXpos = mod(this.curXposLin + 1.0, 2.0) - 1.0;
+    }
+
+    setPosition(x, y, zoom)
+    {
+      this.curXpos = this.tarXpos = x;
+      this.curYpos = this.tarYpos = y;
+
+      if (zoom)
+        this.curZoom = this.tarZoom = zoom;
     }
 
     move()
@@ -1220,21 +1236,26 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
 
   class PIDController
   {
+    #previousValue;
     #previousError;
     #integral;
+    #useSmoothD;
 
-    constructor(kp, ki, kd, iThreshold)
+    constructor(kp, ki, kd, iThreshold, useSmoothD = false)
     {
       this.kp = kp; // Proportional gain
       this.ki = ki; // Integral gain
       this.kd = kd; // Derivative gain
       this.iThreshold = iThreshold;
 
+      this.#useSmoothD = useSmoothD;
+
       this.resetState();
     }
 
     resetState()
     {
+      this.#previousValue = 0;
       this.#previousError = 0;
       this.#integral = 0;
     }
@@ -1255,6 +1276,7 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       // console.log(this.#integral);
 
       this.#previousError = error;
+      this.#previousValue = measuredValue;
 
       let totalOutput = this.kp * error + this.kd * derivative;
 
@@ -1268,53 +1290,105 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
 
   class Autopilot
   {
+    mode;
     targetPitch;
     targetAltitude;
     targetIAS;
 
+    // dependencies:
+    #instrumentPanel;
+    #airplane;
 
-    constructor()
+    constructor(airplane)
     {
+      this.#airplane = airplane;
       // PID for altitude to pitch
       this.altitudePID = new PIDController(0.04, 0.00003, 20.0, 100.0);
       // PID for pitch to elevator
-      this.pitchPID = new PIDController(0.2, 0.001, 5.0, 3.0); // 0.5, 0.001, 100.0
+      this.pitchPID = new PIDController(0.4, 0.001, 20.0, 5.0, true); // 0.5, 0.001, 100.0
 
       this.speedPID = new PIDController(0.1, 0.0003, 0.0, 5.0);
+
+      // PID for glideslope to pitch
+      this.glideslopePID = new PIDController(2.0, 0.0015, 5.0, 3.0);
 
       this.targetPitch = 0.0;
       this.targetAltitude = 5000.0;
       this.targetIAS = 0.0;
+      this.mode = "ALTITUDE";
     }
+
+    bindInstrumentPanel(instrumentPanel) { this.#instrumentPanel = instrumentPanel; }
+
+    setMode(mode) { this.mode = mode; }
 
     resetState()
     {
       this.altitudePID.resetState();
       this.pitchPID.resetState();
       this.speedPID.resetState();
+      this.glideslopePID.resetState();
     }
 
-    update(pitchAttitude, altitude, verticalSpeed, IAS)
+    update(pitchAttitude, altitude, trueVel, IAS, vecToRunway, gearOnGround)
     {
-      this.targetPitch = clamp(this.altitudePID.update(this.targetAltitude, altitude) + 3.0, -6.0, 10.0); // add 3.0 degree pitch bias
+      let targetIAS = this.targetIAS;
 
-      this.targetPitch *= 1.0 - Math.abs(verticalSpeed) * 0.03;                                           // limit vertical speed
+      switch (this.mode) {
+
+      case "ALTITUDE":
+        this.targetPitch = clamp(this.altitudePID.update(this.targetAltitude, altitude) + 3.0, -6.0, 10.0); // add 3.0 degree pitch bias
+
+        this.targetPitch *= 1.0 - Math.abs(trueVel.y) * 0.03;                                               // limit vertical speed
+
+        break;
+      case "AUTOLAND":
+
+        let targetGlideslope = -3.0;
+
+        if (vecToRunway.x <= 4000) {
+          this.#airplane.setGear(true);
+        }
+
+        let currentGlideslope = trueVel.angle() * radToDeg;
+
+        if (vecToRunway.x <= 300) {
+          targetGlideslope = Math.max((vecToRunway.y - 10) * -0.08, -2.0); // flare
+          // targetGlideslope = Math.max(targetGlideslope, currentGlideslope); // prevent acelerating down when entering at shallow angle
+          targetIAS = 0.0;
+
+        } else {
+
+          let slopeToRunway = vecToRunway.angle() * radToDeg;
+
+          targetGlideslope += clamp((slopeToRunway - targetGlideslope) * 3.0, -5.0, 3.0); // move towards ideal glideslope
+
+          targetIAS = map_range_C(vecToRunway.x, 2000, 15000, 90, 128);                   // target speed depend on distance to runway
+        }
+
+
+        this.targetPitch = clamp(this.glideslopePID.update(targetGlideslope, currentGlideslope) + 0.0, -6.0, 10.0);
+
+        break;
+      }
+
+
+      let throttle = clamp(this.speedPID.update(targetIAS, IAS) + 0.40, 0.0, 1.0); // add 40% thrust bias
+
 
       // console.log(this.targetAltitude, altitude, this.targetPitch);
 
-      const elevator = clamp(this.pitchPID.update(this.targetPitch, pitchAttitude), -1.0, 1.0);
+      let elevator = clamp(this.pitchPID.update(this.targetPitch, pitchAttitude) + 0.2, -1.0, 1.0);
+
+
+      if (gearOnGround) {
+        elevator = 0.40;
+        throttle = -1.0;
+      }
 
       //  console.log(this.#desiredPitch, pitchAttitude, elevator);
 
-
-      const throttle = clamp(this.speedPID.update(this.targetIAS, IAS) + 0.40, 0.0, 1.0); // add 40% thrust bias
-
-      let outputs = {
-        pitch : elevator,
-        throttle : throttle
-      }
-
-      return outputs;
+      return [ elevator, throttle ];
     }
   }
 
@@ -1325,10 +1399,16 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
     #panelImg;
     #targetAltInput;
     #targetIASInput;
+    #autolandButton;
+    #altHoldButton;
     #panelDiv;
 
-    constructor()
+    // dependencies:
+    #autopilot
+
+    constructor(autopilot)
     {
+      this.#autopilot = autopilot;
       this.#panelDiv = document.createElement('div');
       this.#instrumentCanvas = document.createElement('canvas');
       this.#instrumentCanvas.width = 750;
@@ -1343,6 +1423,20 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       body.appendChild(this.#panelDiv);
     }
 
+    setMode_AUTOLAND()
+    {
+      this.#autopilot.setMode("AUTOLAND");
+      this.#autolandButton.style.backgroundColor = 'green';
+      this.#altHoldButton.style.backgroundColor = 'grey';
+    }
+
+    setMode_ALTITUDE()
+    {
+      this.#autopilot.setMode("ALTITUDE");
+      this.#autolandButton.style.backgroundColor = 'grey';
+      this.#altHoldButton.style.backgroundColor = 'green';
+    }
+
     genAutopilotBar(panelDiv)
     {
       const container = document.createElement('div');
@@ -1350,7 +1444,6 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       const speedLabel = document.createElement('label');
       speedLabel.textContent = 'Speed (knots):';
       speedLabel.setAttribute('for', 'speed');
-      // speedLabel.style.marginRight = '0px';
       container.appendChild(speedLabel);
       this.#targetIASInput = document.createElement('input');
       this.#targetIASInput.type = 'number';
@@ -1360,17 +1453,31 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       this.#targetIASInput.max = '330';
       this.#targetIASInput.step = '5';
       this.#targetIASInput.value = '220';
-      // this.#targetIASInput.style.float = 'left';
       this.#targetIASInput.style.marginLeft = '0';
       container.appendChild(this.#targetIASInput);
 
       container.appendChild(document.createElement('br'));
 
+      this.#autolandButton = document.createElement('input');
+      this.#autolandButton.type = 'button';
+      this.#autolandButton.value = 'Autoland';
+      this.#autolandButton.addEventListener('click', () => this.setMode_AUTOLAND());
+      this.#autolandButton.style.marginLeft = 'auto';
+      this.#autolandButton.style.marginRight = '0';
+      container.appendChild(this.#autolandButton);
+
+      this.#altHoldButton = document.createElement('input');
+      this.#altHoldButton.type = 'button';
+      this.#altHoldButton.value = 'Hold Altitude';
+      this.#altHoldButton.addEventListener('click', () => this.setMode_ALTITUDE());
+      this.#altHoldButton.style.marginLeft = 'auto';
+      this.#altHoldButton.style.marginRight = '0';
+      container.appendChild(this.#altHoldButton);
+
       // Create the altitude input and its label
       const altitudeLabel = document.createElement('label');
       altitudeLabel.textContent = 'Altitude (ft):';
       altitudeLabel.setAttribute('for', 'altitude');
-      // altitudeLabel.style.float = 'right';
       altitudeLabel.style.marginLeft = 'auto';
       altitudeLabel.style.marginRight = '0';
       container.appendChild(altitudeLabel);
@@ -1390,7 +1497,10 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       container.style = 'display: flex; justify-content: space-between; align-items: center; background-color: #222222; color: white';
 
       panelDiv.appendChild(container);
+
+      this.setMode_ALTITUDE();
     }
+
 
     getTargetAlt() { return this.#targetAltInput.value / mToFt; }
     getTargetIAS() { return this.#targetIASInput.value / msToKnots; }
@@ -1403,7 +1513,7 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
 
     async loadImages() { this.#panelImg = await loadImage('resources/Panel.png'); }
 
-    async display(pitchAngle, moveAngle, altitude, radarAltitude, IAS, groundSpeed, OAT_C, throttle, elevator, targetPitch, autopilotEn, gearStatus)
+    async display(pitchAngle, airAngle, altitude, radarAltitude, IAS, trueVel, OAT_C, throttle, elevator, targetPitch, autopilotEn, gearStatus, runwayPointer, distToRunway)
     {
       let ctx = this.#instrumentCanvas.getContext("2d");
       let width = this.#instrumentCanvas.width;
@@ -1451,15 +1561,12 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
         }
       }
       ctx.stroke();
-
-
       ctx.strokeStyle = 'yellow';
       ctx.beginPath();
-      let moveIndY = mainHeight / 2 + topBarHeight + (pitchAngle - moveAngle) * pixPerDeg;
+      let moveIndY = mainHeight / 2 + topBarHeight + (pitchAngle - trueVel.angle() * radToDeg) * pixPerDeg; // airAngle
       ctx.moveTo(width / 2 - width * 0.15, moveIndY);
       ctx.lineTo(width / 2 + width * 0.15, moveIndY);
       ctx.stroke();
-
 
       ctx.strokeStyle = 'green';
       ctx.beginPath();
@@ -1467,6 +1574,18 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       ctx.moveTo(width / 2 - width * 0.15, targIndY);
       ctx.lineTo(width / 2 + width * 0.15, targIndY);
       ctx.stroke();
+
+      if (distToRunway < 100000) {
+        ctx.strokeStyle = 'blue';
+        ctx.beginPath();
+        let runwayIndY = mainHeight / 2 + topBarHeight + (pitchAngle - runwayPointer) * pixPerDeg;
+        ctx.moveTo(width / 2 - width * 0.15, runwayIndY);
+        ctx.lineTo(width / 2 + width * 0.15, runwayIndY);
+        ctx.stroke();
+        ctx.fillStyle = 'blue';
+        ctx.font = "20px serif";
+        ctx.fillText(printDistance(distToRunway / 1000.0), width / 2 - width * 0.15 - 135, runwayIndY);
+      }
 
       if (this.#panelImg)
         ctx.drawImage(this.#panelImg, 0, topBarHeight, width, mainHeight);
@@ -1620,7 +1739,7 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       ctx.fillText(gearStatusIndicator, 290, 40);
 
 
-      let AOA = pitchAngle - moveAngle;
+      let AOA = pitchAngle - airAngle;
       ctx.fillStyle = '#FFFFFF';
       ctx.fillText('∠ ' + AOA.toFixed(1) + '°', 410, 40);
 
@@ -1642,14 +1761,14 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       // BELOW VIRTUAL HORIZON
 
       ctx.fillStyle = '#AAA';
-      ctx.fillText('GS: ' + printVelocity(groundSpeed), 130, 640);
+      ctx.fillText('GS: ' + printVelocity(trueVel.mag()), 130, 640);
 
       ctx.fillText('ELE: ' + elevator.toFixed(2), 500, 640);
     }
   }
 
 
-  const dt = 1. / 60.;
+  const dt = 1. / FPS;
 
   class PhysicsObject
   {        // 2D PhysicsObject
@@ -1727,14 +1846,44 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
     #gearOnGround;  // if the wheels are touching the ground
     #braking;
 
+    #runwayThresholdPos;
+
     // Controls
     elevator;
     throttle;
 
-    gearStatus; // UP EXTENDING DOWN RETRACTING
+    #gearStatus; // UP EXTENDING DOWN RETRACTING
     #autopilotEnabled;
 
     phys; // physics object, containing all physical properties including position and velocity
+
+    getClosestRunwayPos()
+    {
+      let Xpos = Math.floor(mod(this.phys.pos.x / cellHeight, sim_res_x));
+      // let Ypos = Math.floor(clamp(this.phys.pos.y / cellHeight + 1.0, 100, sim_res_y - 1));
+
+      let Ypos = 90;
+
+      // console.log(Ypos);
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, frameBuff_0);
+      gl.readBuffer(gl.COLOR_ATTACHMENT2); // walltexture
+      var wallTextureValues = new Int8Array(sim_res_x * 4);
+      gl.readPixels(0, Ypos, sim_res_x, 1, gl.RGBA_INTEGER, gl.BYTE, wallTextureValues);
+
+      let x = Xpos - 1;
+      while (x != Xpos) {
+        if (x < 0)
+          x = sim_res_x - 1;
+
+        if (wallTextureValues[x * 4 + 0] == 5) // found runway
+        {
+          return new Vec2D(x * cellHeight, (Ypos - wallTextureValues[x * 4 + 2]) * cellHeight + 15);
+        }
+        x--;
+      }
+      return new Vec2D(0, 0);
+    }
 
     constructor()
     {
@@ -1749,13 +1898,21 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       this.#autopilotEnabled = false;
       this.#gearOnGround = false;
       this.#braking = false;
-      this.#autopilot = new Autopilot();
+      this.#autopilot = new Autopilot(this);
+      this.#runwayThresholdPos = new Vec2D(0, 0);
+    }
+
+    toggleCamFollow()
+    {
+      if (airplaneMode)
+        this.#camFollow = !this.#camFollow;
     }
 
     enableAirplaneMode(autopilotEn)
     {
       this.setAutopilot(autopilotEn);
-      this.#instrumentPanel = new InstrumentPanel();
+      this.#instrumentPanel = new InstrumentPanel(this.#autopilot);
+      this.#autopilot.bindInstrumentPanel(this.#instrumentPanel);
       airplaneMode = true;
       this.#camFollow = true;
       let M = 400 * 1000;         // mass: 400 tons
@@ -1777,15 +1934,18 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       this.throttle = startsOnSurface ? 0.00 : 0.40; // %
 
       if (startsOnSurface) {
-        this.gearStatus = "DOWN";
+        this.#gearStatus = "DOWN";
         this.#gearExtPos = 0.0;
       } else {
-        this.gearStatus = "UP";
+        this.#gearStatus = "UP";
         this.#gearExtPos = 7.0;
+
+        this.#runwayThresholdPos = this.getClosestRunwayPos();
       }
 
       cam.tarZoom = 100.0;
     }
+
     disableAirplaneMode()
     {
       airplaneMode = false;
@@ -1800,12 +1960,19 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
 
     setBrakes(enabled) { this.#braking = enabled; }
 
-    toggleGear()
+
+    toggleGear() { this.setGear(this.#gearStatus == "UP"); }
+
+    setGear(boolDown)
     {
-      if (this.gearStatus == "UP")
-        this.gearStatus = "EXTENDING";
-      else if (this.gearStatus == "DOWN")
-        this.gearStatus = "RETRACTING";
+      if (boolDown) {
+        if (this.#gearStatus == "UP")
+          this.#gearStatus = "EXTENDING";
+
+      } else {
+        if (this.#gearStatus == "DOWN")
+          this.#gearStatus = "RETRACTING";
+      }
     }
 
     // https://aviation.stackexchange.com/questions/64490/is-there-a-simple-relationship-between-angle-of-attack-and-lift-coefficient/97747#97747?newreg=547ea95b1d784abf993b7d1850dcc938
@@ -1882,14 +2049,14 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       gl.readPixels(Xpos - 1, Ypos, 2, 2, gl.RGBA_INTEGER, gl.BYTE, wallTextureValues);
       this.#radarAltitude = (bilerp(wallTextureValues, 2, fractX, fractY) - 1) * cellHeight;
 
-      if (this.gearStatus == "EXTENDING") {
+      if (this.#gearStatus == "EXTENDING") {
         this.#gearExtPos = Math.max(this.#gearExtPos - 0.01, 0.0);
         if (this.#gearExtPos == 0.0)
-          this.gearStatus = "DOWN";
-      } else if (this.gearStatus == "RETRACTING") {
+          this.#gearStatus = "DOWN";
+      } else if (this.#gearStatus == "RETRACTING") {
         this.#gearExtPos = Math.min(this.#gearExtPos + 0.01, 7.0);
         if (this.#gearExtPos == 7.0)
-          this.gearStatus = "UP";
+          this.#gearStatus = "UP";
       }
 
       let heightAboveGround = this.#radarAltitude;
@@ -1992,16 +2159,18 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       this.phys.applyAcceleration(new Vec2D(0.0, -9.81));                                                 // gravity
 
       let normRelVel = new Vec2D(Math.cos(this.#relVelAngle), Math.sin(this.#relVelAngle));
-      let dragMult = (this.gearStatus != "UP" ? 35.0 : 25.0) + Math.abs(Math.sin(AOA) * 150.0);
+      let dragMult = (this.#gearStatus == "UP" ? 25.0 : 35.0) + Math.abs(Math.sin(AOA) * 150.0);
       let dragMag = dynamicPressMult * dragMult;
-
-      if (this.#gearOnGround && this.phys.vel.x < 0.0) {   // (velocity is always negative)
-        dragMag += (this.#braking ? 1000000.0 : 100000.0); // braking is 10 x as strong as the wheel friction
-      }
 
       this.phys.applyForce(new Vec2D(normRelVel.x * dragMag, -normRelVel.y * dragMag));
 
-      this.phys.aVel *= 1. - 0.05 * dt; // angular velocity drag
+      if (this.#gearOnGround) {
+        let gearDragForce = (this.#braking ? 1100000.0 : 110000.0); // braking is 10 x as strong as the wheel friction
+
+        this.phys.applyForce(new Vec2D(this.phys.vel.x > 0.0 ? -gearDragForce : gearDragForce, 0.));
+      }
+
+      this.phys.aVel *= 1. - 0.07 * dt; // angular velocity drag
 
       this.phys.move();
     }
@@ -2016,24 +2185,39 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       if (enabledIn == true) {
         this.#autopilot.resetState();
       }
+
+      this.#runwayThresholdPos = this.getClosestRunwayPos();
+    }
+
+    calcVecToRunway()
+    {
+      let distToRunwayY = this.phys.pos.y - this.#runwayThresholdPos.y;
+      let distToRunwayX = 0;
+      if (this.phys.pos.x > this.#runwayThresholdPos.x) {               // to the right of runway
+        distToRunwayX = this.phys.pos.x - this.#runwayThresholdPos.x;
+      } else if (this.phys.pos.x > this.#runwayThresholdPos.x - 3000) { // above runway
+        distToRunwayX = 0;
+      } else {                                                          // to the left of runway, wrap around map
+        distToRunwayX = sim_res_x * cellHeight + (this.phys.pos.x - this.#runwayThresholdPos.x);
+      }
+      let vecToRunway = new Vec2D(distToRunwayX, distToRunwayY);
+      return vecToRunway;
     }
 
     takeUserInput()
     {
+      const [autopilotElevator, autopilotThrottle] = this.#autopilot.update(this.phys.angle * radToDeg, this.phys.pos.y, this.phys.vel, this.#IAS, this.calcVecToRunway(), this.#gearOnGround);
+
+      this.#autopilot.targetAltitude = this.#instrumentPanel.getTargetAlt();
+      this.#autopilot.targetIAS = this.#instrumentPanel.getTargetIAS();
+
       if (this.#autopilotEnabled) {
-        // let inputs = {pitchAttitude, angleOfAttack, altitude, speed};
 
-        this.#autopilot.targetAltitude = this.#instrumentPanel.getTargetAlt();
-        this.#autopilot.targetIAS = this.#instrumentPanel.getTargetIAS();
+        this.elevator = autopilotElevator;
+        this.throttle = autopilotThrottle;
 
-
-        let verticalSpeed = this.phys.vel.y;
-
-        ({pitch : this.elevator, throttle : this.throttle} = this.#autopilot.update(this.phys.angle * radToDeg, this.phys.pos.y, verticalSpeed, this.#IAS));
-
-        //  this.elevator = this.#autopilot.update(this.phys.angle * radToDeg, this.phys.pos.y);
-
-        //   console.log(this.elevator);
+        if (this.throttle < 0.0)
+          this.#braking = true;
 
       } else {                                                              // manual elevator control
         this.elevator = (mouseY - canvas.height / 2) / canvas.height * 2.0; // pitch input -1.0 to +1.0
@@ -2046,10 +2230,12 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       // console.log(this.phys.angle * radToDeg, this.elevator);
 
       if (upPressed && !this.#autopilotEnabled) {
-        this.throttle = Math.min(this.throttle + .01, 1.0);
+        this.throttle += .01;
       } else if (downPressed && !this.#autopilotEnabled) {
-        this.throttle = Math.max(this.throttle - .01, 0.0);
+        this.throttle -= 0.01;
       }
+
+      this.throttle = clamp(this.throttle, 0.0, 1.0);
     }
 
     display()
@@ -2069,12 +2255,14 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
         cam.tarYpos = -normYpos * 2.0 * (sim_res_y / sim_res_x) + (sim_res_y / sim_res_x);
       }
 
-      this.#instrumentPanel.display(this.phys.angle * radToDeg, this.#relVelAngle * radToDeg, this.phys.pos.y, this.#radarAltitude, this.#IAS, this.#groundSpeed, this.#OAT, this.throttle * 100.0, this.elevator, this.#autopilot.targetPitch, this.#autopilotEnabled, this.gearStatus);
+
+      let vecToRunway = this.calcVecToRunway();
+
+      this.#instrumentPanel.display(this.phys.angle * radToDeg, this.#relVelAngle * radToDeg, this.phys.pos.y, this.#radarAltitude, this.#IAS, this.phys.vel, this.#OAT, this.throttle * 100.0, this.elevator, this.#autopilot.targetPitch, this.#autopilotEnabled, this.#gearStatus, vecToRunway.angle() * radToDeg, vecToRunway.x);
     }
   }
 
   var airplane = new Airplane();
-
 
   document.body.style.overflow = 'hidden'; // prevent scrolling bar from apearing
 
@@ -2963,8 +3151,9 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
 
   function findSimYposAboveSurfaceAtMouseX() // find the lowest location that is not underground
   {
-    let simXpos = Math.floor(mouseXinSim * sim_res_x);
-    let simYpos = Math.floor(mouseYinSim * sim_res_y);
+    let simXpos = clamp(Math.floor(mouseXinSim * sim_res_x), 0, sim_res_x - 1);
+    let simYpos = clamp(Math.floor(mouseYinSim * sim_res_y), 0, sim_res_y - 1);
+    // console.log(simYpos)
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, frameBuff_1);
     gl.readBuffer(gl.COLOR_ATTACHMENT2); // walltexture
@@ -3104,6 +3293,8 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
         guiControls.wholeWidth = !guiControls.wholeWidth; // toggle whole width brush
 
       // lastBpressTime = new Date().getTime();
+    } else if (event.code == 'KeyF') {
+      airplane.toggleCamFollow();
     } else if (event.code == 'KeyV') {
       // V: reset view to full simulation area
       cam.center();
@@ -3120,7 +3311,7 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       logSample();
     } else if (event.code == 'KeyX') {
       // Sample droplets around mouse location
-      logDropletsSample();
+      logDropletsAndToggleFollow();
     } else if (event.code == 'KeyA') {
       if (airplaneMode)
         airplane.disableAirplaneMode();
@@ -3593,11 +3784,20 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
   }
 
 
-  function logDropletsSample()
-  { // log data of all the droplets within the brush
-    const valsPerDroplet = 5;
-    tempDroplets = new Float32Array(valsPerDroplet * NUM_DROPLETS);
-    gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, precipVertexBuffer_0); // x, y, water, ice, density
+  const valsPerDroplet = 5;
+
+  function logDropletsAndToggleFollow()
+  {
+    if (dropletFollowID >= 0) { // disable follow droplet
+      dropletFollowID = -1;
+      let dropletInfoCanvas = document.getElementById('dropletInfoCanvas');
+      dropletInfoCanvas.style.display = 'none';
+      return;
+    }
+
+    // log data of all the droplets within the brush
+    let tempDroplets = new Float32Array(valsPerDroplet * NUM_DROPLETS);
+    gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, even ? precipVertexBuffer_0 : precipVertexBuffer_1); // x, y, water, ice, density
     gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, tempDroplets);
 
     console.log(' ');
@@ -3623,6 +3823,7 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       let dist = Math.sqrt(dx * dx + dy * dy);
 
       if (dist < guiControls.brushSize / 2.0 / sim_res_y) {
+        console.log("n:", n);
         console.log("x:", x);
         console.log("y:", y);
         console.log("water:", water);
@@ -3630,20 +3831,60 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
         console.log("Density:", density);
         console.log(" ");
         numInBrush++;
-      }
 
-      // check for duplicates
-      if (n < NUM_DROPLETS - 1) {
-        for (let d = n + 1; d < NUM_DROPLETS; d++) {
-          let j = d * valsPerDroplet;
-          if (X == tempDroplets[j + 0] && Y == tempDroplets[j + 1]) {
-            duplicates++;
-            break;
-          }
+
+        if (numInBrush == 1) { // first droplet found
+          dropletFollowID = n;
+          dropletInfoCanvas.style.display = 'block';
         }
       }
+      /*
+        // check for duplicates. Very slow!
+        if (n < NUM_DROPLETS - 1) {
+          for (let d = n + 1; d < NUM_DROPLETS; d++) {
+            let j = d * valsPerDroplet;
+            if (X == tempDroplets[j + 0] && Y == tempDroplets[j + 1]) {
+              duplicates++;
+              break;
+            }
+          }
+        }
+      */
     }
     console.log(NUM_DROPLETS, "total droplets. ", numInBrush, "droplets logged. ", duplicates, " duplicates found");
+
+
+    // dropletFollowMode = true;
+  }
+
+
+  function readDropletData(n)
+  {
+    let i = n * valsPerDroplet;
+    let byteOffset = i * 4; // Convert to byte offset
+
+    let dropletData = new Float32Array(valsPerDroplet);
+    gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, even ? precipVertexBuffer_0 : precipVertexBuffer_1);
+    gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, byteOffset, dropletData, 0, valsPerDroplet);
+
+    dropletData[0] = (dropletData[0] + 1.0) / 2.0;
+    dropletData[1] = (dropletData[1] + 1.0) / 2.0;
+
+    // let x = dropletData[0];
+    // let y = dropletData[1];
+    // let water = dropletData[2];
+    // let ice = dropletData[3];
+    // let density = dropletData[4];
+
+    // console.log("Droplet ", n);
+    // console.log("x:", x);
+    // console.log("y:", y);
+    // console.log("water:", water);
+    // console.log("Ice:", ice);
+    // console.log("Density:", density);
+    // console.log(" ");
+
+    return dropletData;
   }
 
 
@@ -3701,7 +3942,7 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
   const lightTexture_1 = gl.createTexture();
   const precipitationFeedbackTexture = gl.createTexture();
   const precipitationDepositionTexture = gl.createTexture();
-  const lightningLocationTexture = gl.createTexture(); // single pixel texture holding location and timing of current lightning strike
+  const lightningDataTexture = gl.createTexture(); // single pixel texture holding location and timing of current lightning strike
 
   // Static texures:
   const noiseTexture = gl.createTexture();
@@ -3723,7 +3964,7 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
   lightFrameBuff_0 = gl.createFramebuffer();
   const lightFrameBuff_1 = gl.createFramebuffer();
   const precipitationFeedbackFrameBuff = gl.createFramebuffer();
-  const lightningLocationFrameBuff = gl.createFramebuffer();
+  const lightningDataFrameBuff = gl.createFramebuffer();
 
   // Set up Textures
   async function setupTextures()
@@ -3848,13 +4089,13 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, precipitationFeedbackTexture, 0);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, precipitationDepositionTexture, 0);
 
-  gl.bindTexture(gl.TEXTURE_2D, lightningLocationTexture);
+  gl.bindTexture(gl.TEXTURE_2D, lightningDataTexture);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 1, 1, 0, gl.RGBA, gl.FLOAT, null);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
-  gl.bindFramebuffer(gl.FRAMEBUFFER, lightningLocationFrameBuff);
-  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, lightningLocationTexture, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, lightningDataFrameBuff);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, lightningDataTexture, 0);
 
   // load images
   imgElement = await loadImage('resources/noise_texture.jpg');
@@ -4109,7 +4350,7 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
   gl.uniform1i(gl.getUniformLocation(realisticDisplayProgram, 'surfaceTextureMap'), 5);
   gl.uniform1i(gl.getUniformLocation(realisticDisplayProgram, 'curlTex'), 6);
   gl.uniform1i(gl.getUniformLocation(realisticDisplayProgram, 'lightningTex'), 7);
-  gl.uniform1i(gl.getUniformLocation(realisticDisplayProgram, 'lightningLocationTex'), 8);
+  gl.uniform1i(gl.getUniformLocation(realisticDisplayProgram, 'lightningDataTex'), 8);
   gl.uniform1i(gl.getUniformLocation(realisticDisplayProgram, 'ambientLightTex'), 9);
   gl.uniform1f(gl.getUniformLocation(realisticDisplayProgram, 'dryLapse'), dryLapse);
   gl.uniform1f(gl.getUniformLocation(realisticDisplayProgram, 'cellHeight'), cellHeight);
@@ -4117,7 +4358,7 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
   gl.useProgram(precipitationProgram);
   gl.uniform1i(gl.getUniformLocation(precipitationProgram, 'baseTex'), 0);
   gl.uniform1i(gl.getUniformLocation(precipitationProgram, 'waterTex'), 1);
-  gl.uniform1i(gl.getUniformLocation(precipitationProgram, 'lightningLocationTex'), 2);
+  gl.uniform1i(gl.getUniformLocation(precipitationProgram, 'lightningDataTex'), 2);
   gl.uniform2f(gl.getUniformLocation(precipitationProgram, 'resolution'), sim_res_x, sim_res_y);
   gl.uniform2f(gl.getUniformLocation(precipitationProgram, 'texelSize'), texelSizeX, texelSizeY);
   gl.uniform1f(gl.getUniformLocation(precipitationProgram, 'dryLapse'), dryLapse);
@@ -4446,7 +4687,7 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
               gl.activeTexture(gl.TEXTURE1);
               gl.bindTexture(gl.TEXTURE_2D, waterTexture_1);
               gl.activeTexture(gl.TEXTURE2);
-              gl.bindTexture(gl.TEXTURE_2D, lightningLocationTexture);
+              gl.bindTexture(gl.TEXTURE_2D, lightningDataTexture);
 
               gl.bindVertexArray(srcVAO);
               gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, destTF);
@@ -4480,15 +4721,15 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
               gl.activeTexture(gl.TEXTURE0);
               gl.bindTexture(gl.TEXTURE_2D, precipitationFeedbackTexture);
 
-              gl.bindFramebuffer(gl.FRAMEBUFFER, lightningLocationFrameBuff);
+              gl.bindFramebuffer(gl.FRAMEBUFFER, lightningDataFrameBuff);
               gl.drawBuffers([ gl.COLOR_ATTACHMENT0 ]);
               gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
               // only for debugging
               // gl.readBuffer(gl.COLOR_ATTACHMENT0);
-              // var lightningLocationValues = new Float32Array(4);
-              // gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, lightningLocationValues);
-              // console.log('lightningLocationValues: ', lightningLocationValues[0], lightningLocationValues[1], lightningLocationValues[2], IterNum);
+              // var lightningDataValues = new Float32Array(4);
+              // gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, lightningDataValues);
+              // console.log('lightningDataValues: ', lightningDataValues[0], lightningDataValues[1], lightningDataValues[2], IterNum);
             }
 
             if (displayWeatherStations && IterNum % 208 == 0) { // ~every 60 in game seconds:  0.00008 *3600 * 208 = 59.9
@@ -4537,6 +4778,34 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       cursorType += 0.55;
     }
 
+    // Follow droplet
+    if (dropletFollowID >= 0) {
+      let dropletInfo = readDropletData(dropletFollowID);
+      cam.setPosition(-dropletInfo[0] * 2.0 + 1.0, -dropletInfo[1] * 2.0 * (sim_res_y / sim_res_x) + (sim_res_y / sim_res_x));
+
+      let dropletInfoCanvas = document.getElementById('dropletInfoCanvas');
+      let ctx = dropletInfoCanvas.getContext('2d');
+
+      ctx.clearRect(0, 0, dropletInfoCanvas.width, dropletInfoCanvas.height);
+      ctx.fillStyle = '#00000055';
+      ctx.fillRect(0, 0, dropletInfoCanvas.width, dropletInfoCanvas.height);
+
+      ctx.fillStyle = '#FF0000';
+      ctx.fillRect(0, 0, 2, 2);
+
+      ctx.font = '15px Arial';
+      ctx.fillStyle = '#00AAFF';
+      ctx.fillText('Water: ' + dropletInfo[2].toFixed(2), 0, 15);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillText('Ice     : ' + dropletInfo[3].toFixed(2), 0, 30);
+      ctx.fillStyle = '#00FF00';
+      ctx.fillText('Dens : ' + dropletInfo[4].toFixed(2), 0, 45);
+    }
+
+    if (airplaneMode) {
+      airplane.display();
+    }
+
     // render to canvas
     gl.useProgram(realisticDisplayProgram);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null); // null is canvas
@@ -4544,9 +4813,6 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
     gl.clearColor(0.0, 0.0, 0.0, 1.0);        // background color
     gl.clear(gl.COLOR_BUFFER_BIT);
 
-    if (airplaneMode) {
-      airplane.display();
-    }
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, baseTexture_1);
@@ -4683,7 +4949,7 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
       gl.activeTexture(gl.TEXTURE7);
       gl.bindTexture(gl.TEXTURE_2D, lightningTextures[lightningTexNum]);
       gl.activeTexture(gl.TEXTURE8);
-      gl.bindTexture(gl.TEXTURE_2D, lightningLocationTexture);
+      gl.bindTexture(gl.TEXTURE_2D, lightningDataTexture);
 
       gl.activeTexture(gl.TEXTURE9);
       gl.bindTexture(gl.TEXTURE_2D, ambientLightFBOs[0].texture);
@@ -5178,25 +5444,54 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
     });
   }
 
-  function adjIterPerFrame(adj) { guiControls.IterPerFrame = Math.round(Math.min(Math.max(guiControls.IterPerFrame + adj, 1), 50)); }
+  function adjIterPerFrame(adj) { guiControls.IterPerFrame = Math.round(clamp(guiControls.IterPerFrame + adj, 1, 50)); }
 
   function isPageHidden() { return document.hidden || document.msHidden || document.webkitHidden || document.mozHidden; }
 
   function calcFps()
   {
     if (!isPageHidden()) {
-      var FPS = frameNum - lastFrameNum;
+      FPS = frameNum - lastFrameNum;
       lastFrameNum = frameNum;
 
-      const fpsTarget = 60;
+
+      console.log(FPS + ' FPS   ' + guiControls.IterPerFrame + ' Iterations / frame      ' + FPS * guiControls.IterPerFrame + ' Iterations / second');
 
       if (guiControls.auto_IterPerFrame && !(guiControls.paused || airplaneMode)) {
-        console.log(FPS + ' FPS   ' + guiControls.IterPerFrame + ' Iterations / frame      ' + FPS * guiControls.IterPerFrame + ' Iterations / second');
+        const fpsTarget = 60;
         adjIterPerFrame((FPS / fpsTarget - 1.0) * 5.0); // example: ((30 / 60)-1.0) = -0.5
 
         if (FPS == fpsTarget)
           adjIterPerFrame(1);
       }
+
+      // calculate total amounts of water and smoke for verification of fluid simulation
+      /*
+            gl.bindFramebuffer(gl.FRAMEBUFFER, frameBuff_1);
+            gl.readBuffer(gl.COLOR_ATTACHMENT1); // watertexture
+            var waterTextureValues = new Float32Array(sim_res_x * sim_res_y * 4);
+            gl.readPixels(0, 0, sim_res_x, sim_res_y, gl.RGBA, gl.FLOAT, waterTextureValues);
+
+            let totalWaterVapor = 0.0;
+            let totalCloudWater = 0.0;
+            let totalSmoke = 0.0;
+
+            for (let x = 0; x < sim_res_x; x++) {
+              for (let y = 0; y < sim_res_y; y++) {
+                let cellInd = (x + y * sim_res_x) * 4;
+                let vapor = waterTextureValues[cellInd + 0];
+                if (vapor < 1000.0) { // ignore wall
+                  totalCloudWater += waterTextureValues[cellInd + 1];
+                  totalWaterVapor += vapor;
+
+                  totalSmoke += waterTextureValues[cellInd + 3];
+                }
+              }
+            }
+
+            let totalWater = totalWaterVapor + totalCloudWater;
+            console.log('Water  Vapor  Cloud  Smoke\n', Math.round(totalWater), Math.round(totalWaterVapor), Math.round(totalCloudWater), Math.round(totalSmoke));
+            */
     }
   }
 } // end of mainscript

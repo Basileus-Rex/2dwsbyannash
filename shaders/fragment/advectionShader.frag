@@ -20,7 +20,7 @@ uniform isampler2D wallTex;
 
 uniform vec4 userInputValues; // xpos    Ypos     intensity     Brush Size
 
-#define INTENSITY 2
+#define BRUSH_INTENSITY 2
 #define BRUSH_SIZE 3
 
 uniform vec2 userInputMove;  // moveX  moveY
@@ -144,7 +144,7 @@ void main()
 
       if (texCoord.y > 0.93) {
         base[TEMPERATURE] -= (KtoC(realTemp) - -55.0) * 0.0005; // tropopause temperature stabilization
-        water[TOTAL] -= (water[TOTAL] - 0.0125) * 0.0001;       // keep stratosphere dew point around -80C
+        // water[TOTAL] -= (water[TOTAL] - 0.0125) * 0.0001;       // keep stratosphere dew point around -80C
       }
     }
 
@@ -224,7 +224,7 @@ void main()
 
   if (inBrush) {
     if (userInputType == 1) {                                              // temperature
-      base[3] += userInputValues[INTENSITY];
+      base[3] += userInputValues[BRUSH_INTENSITY];
       if (wall[TYPE] == 2 && wall[DISTANCE] == 0)                          // water wall
         base[3] = clamp(base[TEMPERATURE], CtoK(0.0), CtoK(maxWaterTemp)); // limit water temperature range
     } else if (userInputType == 2) {                                       // water
@@ -232,8 +232,8 @@ void main()
 
       //     if ()
 
-      float cloudWaterChange = userInputValues[INTENSITY]; // positive intensity
-      // float vaporChange = max(userInputValues[INTENSITY]);
+      float cloudWaterChange = userInputValues[BRUSH_INTENSITY]; // positive intensity
+      // float vaporChange = max(userInputValues[BRUSH_INTENSITY]);
 
 
       if (water[CLOUD] > 0.0) {                // add as liquid
@@ -245,18 +245,18 @@ void main()
       // }
 
     } else if (userInputType == 3 && wall[DISTANCE] != 0) { // smoke, only apply if not wall
-      water[SMOKE] += userInputValues[INTENSITY];
+      water[SMOKE] += userInputValues[BRUSH_INTENSITY];
       water[SMOKE] = min(max(water[SMOKE], 0.0), 2.0);
 
-    } else if (userInputType == 4) {                                           // drag/move air
+    } else if (userInputType == 4) {                                                 // drag/move air
 
-      if (userInputValues.x < -0.5) {                                          // whole width brush
-        base.x += userInputMove.x * 1.0 * weight * userInputValues[INTENSITY]; // only move horizontally
+      if (userInputValues.x < -0.5) {                                                // whole width brush
+        base.x += userInputMove.x * 1.0 * weight * userInputValues[BRUSH_INTENSITY]; // only move horizontally
       } else {
-        base.xy += userInputMove * 1.0 * weight * userInputValues[INTENSITY];
+        base.xy += userInputMove * 1.0 * weight * userInputValues[BRUSH_INTENSITY];
       }
-    } else if (userInputType >= 10) {         // wall
-      if (userInputValues[INTENSITY] > 0.0) { // build wall if positive value else remove wall
+    } else if (userInputType >= 10) {               // wall
+      if (userInputValues[BRUSH_INTENSITY] > 0.0) { // build wall if positive value else remove wall
 
         bool setWall = false;
 
@@ -280,25 +280,25 @@ void main()
             setWall = true;
           }
           break;
-        case 14:                                                                                                     // set urban
-          if (wall[DISTANCE] == 0 && wall[TYPE] == WALLTYPE_LAND && texture(wallTex, texCoordX0Yp)[DISTANCE] != 0) { // if land wall and no wall above
+        case 14:                                                                                                                                        // set urban
+          if (wall[DISTANCE] == 0 && (wall[TYPE] == WALLTYPE_LAND || wall[TYPE] == WALLTYPE_RUNWAY) && texture(wallTex, texCoordX0Yp)[DISTANCE] != 0) { // if land wall and no wall above
             wall[TYPE] = WALLTYPE_URBAN;
           }
           break;
-        case 15:                                                                                                     // set runway
-          if (wall[DISTANCE] == 0 && wall[TYPE] == WALLTYPE_LAND && texture(wallTex, texCoordX0Yp)[DISTANCE] != 0) { // if land wall and no wall above
+        case 15:                                                                                                                                       // set runway
+          if (wall[DISTANCE] == 0 && (wall[TYPE] == WALLTYPE_LAND || wall[TYPE] == WALLTYPE_URBAN) && texture(wallTex, texCoordX0Yp)[DISTANCE] != 0) { // if land wall and no wall above
             wall[TYPE] = WALLTYPE_RUNWAY;
           }
           break;
 
         case 20:                                                                                                      // add soil moisture
           if (wall[DISTANCE] == 0 && wall[TYPE] != WALLTYPE_WATER && texture(wallTex, texCoordX0Yp)[DISTANCE] != 0) { // if land wall and no wall above
-            water[SOIL_MOISTURE] += userInputValues[INTENSITY] * 10.0;
+            water[SOIL_MOISTURE] += userInputValues[BRUSH_INTENSITY] * 10.0;
           }
           break;
         case 21:                                                                                                                                       // add snow
           if (wall[DISTANCE] == 0 && (wall[TYPE] == WALLTYPE_LAND || wall[TYPE] == WALLTYPE_URBAN) && texture(wallTex, texCoordX0Yp)[DISTANCE] != 0) { // if land wall and no wall above
-            water[SNOW] += userInputValues[INTENSITY] * 0.5;
+            water[SNOW] += userInputValues[BRUSH_INTENSITY] * 0.5;
           }
           break;
         case 22:                                                                                                                                                                      // add vegetation
@@ -321,23 +321,26 @@ void main()
           }
         }
       } else {
-        if (wall[DISTANCE] == 0) {            // remove wall only if it is a wall and not bottem layer
+        if (wall[DISTANCE] == 0) {           // remove wall only if it is a wall and not bottem layer
 
-          if (userInputType == 13) {          // fire
-            if (wall[TYPE] == WALLTYPE_FIRE)  // extinguish fire
+          if (userInputType == 13) {         // fire
+            if (wall[TYPE] == WALLTYPE_FIRE) // extinguish fire
               wall[TYPE] = WALLTYPE_LAND;
-          } else if (userInputType == 14) {   // urban
+          } else if (userInputType == 14) {
             if (wall[TYPE] == WALLTYPE_URBAN) // remove buildings
               wall[TYPE] = WALLTYPE_LAND;
-          } else if (userInputType == 20) {   // remove moisture
-            water[SOIL_MOISTURE] += userInputValues[INTENSITY] * 10.0;
+          } else if (userInputType == 15) {
+            if (wall[TYPE] == WALLTYPE_RUNWAY) // remove runway
+              wall[TYPE] = WALLTYPE_LAND;
+          } else if (userInputType == 20) {    // remove moisture
+            water[SOIL_MOISTURE] += userInputValues[BRUSH_INTENSITY] * 10.0;
           } else if (userInputType == 21) {
-            water[SNOW] += userInputValues[INTENSITY] * 0.5; // remove snow
+            water[SNOW] += userInputValues[BRUSH_INTENSITY] * 0.5; // remove snow
           } else if (userInputType == 22) {
-            wall[VEGETATION] = max(wall[VEGETATION] - 1, 0); // remove vegetation
+            wall[VEGETATION] = max(wall[VEGETATION] - 1, 0);       // remove vegetation
           } else if (texCoord.y > texelSize.y) {
-            wall[DISTANCE] = 255;                            // remove wall
-            base[VX] = 0.0;                                  // reset all properties to prevent NaN bug
+            wall[DISTANCE] = 255;                                  // remove wall
+            base[VX] = 0.0;                                        // reset all properties to prevent NaN bug
             base[VY] = 0.0;
             base[PRESSURE] = 0.0;
             base[TEMPERATURE] = getInitialT(int(texCoord.y * (1.0 / texelSize.y)));

@@ -255,6 +255,10 @@
 					<td>Toggle Flight Simulator Mode. Vertical Mouse position controls elevator, Throttle: ▲ ▼ </td>
 				</tr>
 				<tr>
+					<td>F</td>
+					<td>Toggle camera following plane</td>
+				</tr>
+				<tr>
 					<td>Shift</td>
 					<td>Toggle Gear</td>
 				</tr>
@@ -269,6 +273,10 @@
 				<tr>
 					<td>D</td>
 					<td>Show / Hide Droplets</td>
+				</tr>
+				<tr>
+					<td>X</td>
+					<td>Toggle follow droplet</td>
 				</tr>
 				<tr>
 					<td>G</td>
@@ -339,6 +347,8 @@
 		</div>
 	</div>
 	<canvas id="graphCanvas"></canvas>
+	<canvas id="dropletInfoCanvas" width="90" height="50"
+		style="z-index: 1; position: absolute; left: 50%; top: 50%;"></canvas>
 	<canvas id="mainCanvas">
 		Your browser does not support HTML5, you must be using a really old
 		browser!
