@@ -246,7 +246,7 @@ void main()
 
     } else if (userInputType == 3 && wall[DISTANCE] != 0) { // smoke, only apply if not wall
       water[SMOKE] += userInputValues[BRUSH_INTENSITY];
-      water[SMOKE] = min(max(water[SMOKE], 0.0), 2.0);
+      water[SMOKE] = min(max(water[SMOKE], 0.0), 1000.0);
 
     } else if (userInputType == 4) {                                                 // drag/move air
 
