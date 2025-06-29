@@ -10,7 +10,7 @@ precision highp isampler2D;
 
 #define standardSunBrightness 1250.; // W/m2
 
-#define maxWaterTemp 40.0
+#define maxWaterTemp 3000.0
 
 
 #define fullGreenSoilMoisture 50.0 // level of soil moisture where vegetation reaches the greenest color
