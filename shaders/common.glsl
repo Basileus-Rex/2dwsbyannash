@@ -10,7 +10,7 @@ precision highp isampler2D;
 
 #define standardSunBrightness 1250.; // W/m2
 
-#define maxWaterTemp 40.0
+#define maxWaterTemp 300.0
 
 #define waterHeatExchangeRate 0.0002
 
